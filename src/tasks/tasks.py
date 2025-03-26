@@ -5,7 +5,7 @@ from database import sync_engine
 from links.models import links  
 from celery import Celery
 
-celery_app = Celery('tasks', broker="redis://redis:6379")
+celery_app = Celery('tasks', broker="redis://redis:6379/0")
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=sync_engine)
 
 @celery_app.task() 

@@ -4,20 +4,30 @@ services:
     image: postgres:16
     container_name: db_app
     environment:
-      - POSTGRES_USER=root
-      - POSTGRES_PASSWORD=root
-      - POSTGRES_DB=postgres
+      POSTGRES_USER: root
+      POSTGRES_PASSWORD: root
+      POSTGRES_DB: postgres  # Исправлено с POSTGRES_NAME
     ports:
       - "5432:5432"
+    healthcheck:  # Добавлен healthcheck
+      test: ["CMD-SHELL", "pg_isready -U root -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   redis:
     image: redis:7
     container_name: redis_app
-    command: --port 6379
-    expose:
-      - "6379"
+    ports:  # Заменено expose на ports
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   app:
+    env_file: ".env"
     build:
       context: .
     container_name: fastapi_app
@@ -25,13 +35,18 @@ services:
     ports:
       - "9999:8000"
     depends_on:
-      - db
-      - redis
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+        
+
 
   celery:
     build:
       context: .
     container_name: celery_app
-    command: ["/fastapi_app/docker/celery.sh", "celery"]
+    command:  ["/fastapi_app/docker/celery.sh", "celery"]
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
