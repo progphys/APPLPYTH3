@@ -166,4 +166,17 @@ curl -X GET "http://localhost:8000/links/links/expired"
 
 ## Инструкция по запуску
 
+1. Необходимо создать файол `.env` в таком формате:
+```ini
+DB_USER=root
+DB_PASS=root
+DB_HOST=db
+DB_PORT=5432
+DB_NAME=postgres
+SECRET="SECRET"
+```
+2. Перейти в корень проекта(репозитория) и выполнить команд
+```bash
+docker-compose up --build
+```
 
