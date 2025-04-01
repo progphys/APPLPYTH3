@@ -1,25 +1,25 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Request
-
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import RedirectResponse
-from sqlalchemy import select, insert, update,delete
+from sqlalchemy import select, insert, update, delete
 from sqlalchemy.ext.asyncio import AsyncSession
-import time
+from datetime import datetime, timezone
+import hashlib
+from typing import Optional, List
 from database import get_async_session
 from .models import links
-from .schemas import LinkResponse, LinkCreateRequest,LinkStats,LinkNewCreateRequest
-import hashlib
-from datetime import datetime 
-from auth.users import current_active_user  
-from auth.db import User  
-from typing import Optional, List
-from auth.users import fastapi_users 
+from .schemas import LinkResponse, LinkCreateRequest, LinkStats, LinkNewCreateRequest
+from auth.users import current_active_user
+from auth.db import User
+from auth.users import fastapi_users
 from fastapi_cache.decorator import cache
-from tasks.tasks import delete_expired_link
 from fastapi_cache import FastAPICache
+from tasks.tasks import delete_expired_link
+
 router = APIRouter(
     prefix="/links",
     tags=["links"]
 )
+
 def generate_short_link(long_link: str) -> str:
     return hashlib.md5(long_link.encode()).hexdigest()[:8]
 
@@ -38,6 +38,7 @@ async def shorten_link(
         )
     else:
         stmt = select(links).where(links.c.long_link == link_req.long_link)
+
     result = await session.execute(stmt)
     existing_link = result.scalar_one_or_none()
     if existing_link:
@@ -69,12 +70,15 @@ async def shorten_link(
     link_data = {
         "long_link": link_req.long_link,
         "short_link": short_link,
-        "auth": True if current_user else False,
-        "user_id": current_user.id if current_user else None,  
-        "start_date": datetime.utcnow(),
-        "last_date": datetime.utcnow(),
+        "auth": bool(current_user),
+        "user_id": current_user.id if current_user else None,
+        "start_date": datetime.now(timezone.utc),
+        "last_date": datetime.now(timezone.utc),
         "num": 0,
-        "expires_at": link_req.expires_at  
+        "expires_at": (
+            link_req.expires_at.replace(tzinfo=timezone.utc) 
+            if link_req.expires_at else None
+        )
     }
 
     statement = insert(links).values(**link_data).returning(links.c.id)
@@ -82,23 +86,21 @@ async def shorten_link(
     await session.commit()
 
     new_id = result.scalar_one()
-    
+
     if link_req.expires_at:
         delete_expired_link.apply_async(
-    args=[new_id],
-    eta=link_req.expires_at,
-    queue='celery' 
-)
-    
+            args=[new_id],
+            eta=link_req.expires_at,
+            queue='celery'
+        )
+
     stmt = select(links).where(links.c.id == new_id)
     query_result = await session.execute(stmt)
     new_link = query_result.fetchone()
-
     return new_link
 
-
 def short_link_key_builder(function, *args, **kwargs) -> str:
-    short_link = args[0]
+    short_link = args[0]  
     return f"long_link:{short_link}"
 
 @cache(expire=60, key_builder=short_link_key_builder)
@@ -115,21 +117,28 @@ async def get_long_link(
     short_link: str,
     session: AsyncSession = Depends(get_async_session)
 ):
-    long_link = await get_cached_long_link(short_link, session)
-    
+    try:
+        long_link = await get_cached_long_link(short_link, session)
+    except HTTPException as e:
+        raise e
+    stmt = select(links.c.expires_at).where(links.c.short_link == short_link)
+    result = await session.execute(stmt)
+    expires_at = result.scalar()
+    if expires_at and expires_at < datetime.now(timezone.utc):
+        raise HTTPException(status_code=404, detail="Ссылка истекла")
+    await session.execute(
+        update(links)
+        .where(links.c.short_link == short_link)
+        .values(num=links.c.num + 1, last_date=datetime.now(timezone.utc))
+    )
+    await session.commit()
     if not long_link.startswith(("http://", "https://")):
         long_link = "http://" + long_link
 
-    stmt = update(links).where(links.c.short_link == short_link).values(num=links.c.num + 1)
-    await session.execute(stmt)
-    await session.commit()
-    
     return RedirectResponse(url=long_link)
 
-
-
 @router.get("/{short_code}/stats", response_model=LinkStats)
-@cache(expire=60) 
+@cache(expire=60)
 async def get_link_stats(
     short_code: str,
     session: AsyncSession = Depends(get_async_session)
@@ -148,6 +157,7 @@ async def get_link_stats(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Ссылка не найдена"
         )
+
     return LinkStats(
         long_link=row.long_link,
         created_at=row.start_date,
@@ -164,7 +174,6 @@ async def search_short_link(
     stmt = select(links.c.short_link).where(links.c.long_link == long_link)
     result = await session.execute(stmt)
     short_link = result.scalar()
-
     if not short_link:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -184,7 +193,6 @@ async def delete_link(
     )
     result = await session.execute(stmt)
     link_record = result.scalar_one_or_none()
-
     if not link_record:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -194,19 +202,20 @@ async def delete_link(
     delete_stmt = delete(links).where(links.c.short_link == short_code)
     await session.execute(delete_stmt)
     await session.commit()
+
     cache_key = f"long_link:{short_code}"
     backend = FastAPICache.get_backend()
     await backend.clear(cache_key)
+
     return {"detail": "Ссылка успешно удалена."}
 
 @router.put("/{short_code}", response_model=LinkResponse)
 async def update_link(
     short_code: str,
-    link_update: LinkNewCreateRequest, 
+    link_update: LinkNewCreateRequest,
     session: AsyncSession = Depends(get_async_session),
     current_user: User = Depends(current_active_user)
 ):
-
     stmt = select(links).where(
         (links.c.short_link == short_code) &
         (links.c.user_id == current_user.id)
@@ -224,20 +233,22 @@ async def update_link(
         .where(links.c.short_link == short_code)
         .values(
             long_link=link_update.new_long_link,
-            last_date=datetime.utcnow()
+            last_date=datetime.now(timezone.utc)
         )
         .returning(links)
     )
     result = await session.execute(update_stmt)
     await session.commit()
-    
+
     updated_link = result.mappings().all()
     if updated_link:
-        updated_link = dict(updated_link[0]) 
-    
+        updated_link = dict(updated_link[0])
+
+    # Инвалидируем кэш по short_code
     cache_key = f"long_link:{short_code}"
     backend = FastAPICache.get_backend()
     await backend.clear(cache_key)
+
     return updated_link
 
 @router.get("/expired", response_model=List[LinkResponse])
@@ -245,7 +256,7 @@ async def update_link(
 async def get_expired_links(
     session: AsyncSession = Depends(get_async_session)
 ):
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     stmt = select(links).where(
         links.c.expires_at != None,
         links.c.expires_at < now
@@ -253,4 +264,3 @@ async def get_expired_links(
     result = await session.execute(stmt)
     expired_links = result.mappings().all()
     return expired_links
-
