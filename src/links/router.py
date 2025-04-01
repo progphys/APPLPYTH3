@@ -240,7 +240,7 @@ async def update_link(
     await backend.clear(cache_key)
     return updated_link
 
-@router.get("/links/expired", response_model=List[LinkResponse])
+@router.get("/expired", response_model=List[LinkResponse])
 @cache(expire=60)
 async def get_expired_links(
     session: AsyncSession = Depends(get_async_session)

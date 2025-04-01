@@ -6,7 +6,7 @@ services:
     environment:
       POSTGRES_USER: root
       POSTGRES_PASSWORD: root
-      POSTGRES_DB: postgres  # Исправлено с POSTGRES_NAME
+      POSTGRES_DB: postgres 
     ports:
       - "5432:5432"
     healthcheck:  # Добавлен healthcheck
