@@ -1,4 +1,6 @@
 .env
 .vscode/
 .venv/
-.*
+.pytest_cache
+__*
+.coverage
